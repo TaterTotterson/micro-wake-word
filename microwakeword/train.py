@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import os
-import platform
 import contextlib
 
 from absl import logging
@@ -26,12 +25,19 @@ import tensorflow as tf
 from tensorflow.python.util import tf_decorator
 
 
+def _to_numpy(x):
+    if hasattr(x, "numpy"):
+        return x.numpy()
+    if isinstance(x, np.ndarray):
+        return x
+    return np.array(x)
+
+
 @contextlib.contextmanager
 def swap_attribute(obj, attr, temp_value):
     """Temporarily swap an attribute of an object."""
     original_value = getattr(obj, attr)
     setattr(obj, attr, temp_value)
-
     try:
         yield
     finally:
@@ -61,7 +67,6 @@ def validate_nonstreaming(config, data_processor, model, test_set):
     metrics["accuracy"] = result["accuracy"]
     metrics["recall"] = result["recall"]
     metrics["precision"] = result["precision"]
-
     metrics["auc"] = result["auc"]
     metrics["loss"] = result["loss"]
     metrics["recall_at_no_faph"] = 0
@@ -70,7 +75,11 @@ def validate_nonstreaming(config, data_processor, model, test_set):
     metrics["ambient_false_positives_per_hour"] = 0
     metrics["average_viable_recall"] = 0
 
-    test_set_fp = result["fp"].numpy()
+    # ✅ already good
+    test_set_fp = _to_numpy(result["fp"])
+    test_set_fn = _to_numpy(result["fn"])
+    test_set_tp = _to_numpy(result["tp"])
+    test_set_tn = _to_numpy(result["tn"])
 
     if data_processor.get_mode_size("validation_ambient") > 0:
         (
@@ -99,11 +108,13 @@ def validate_nonstreaming(config, data_processor, model, test_set):
             data_processor.get_mode_duration("validation_ambient") / 3600.0
         )
 
-        # Other than the false positive rate, all other metrics are accumulated across
-        # both test sets
-        all_true_positives = ambient_predictions["tp"].numpy()
-        ambient_false_positives = ambient_predictions["fp"].numpy() - test_set_fp
-        all_false_negatives = ambient_predictions["fn"].numpy()
+        # 🔴 THESE were still using .numpy() directly
+        all_true_positives = _to_numpy(ambient_predictions["tp"])
+        ambient_fp_raw = _to_numpy(ambient_predictions["fp"])
+        all_false_negatives = _to_numpy(ambient_predictions["fn"])
+
+        # subtract test-set fp we computed above
+        ambient_false_positives = ambient_fp_raw - test_set_fp
 
         metrics["auc"] = ambient_predictions["auc"]
         metrics["loss"] = ambient_predictions["loss"]
@@ -144,12 +155,9 @@ def validate_nonstreaming(config, data_processor, model, test_set):
 
         for index in range(index_of_first_viable, len(recall_at_cutoffs)):
             if faph_at_cutoffs[index] != x_coordinates[-1]:
-                # Only add a point if it is a new faph
-                # This ensures if a faph rate is repeated, we use the highest recall
                 x_coordinates.append(faph_at_cutoffs[index])
                 y_coordinates.append(recall_at_cutoffs[index])
 
-        # Use trapezoid rule to estimate the area under the curve, then divide by 2.0 to get the average recall
         average_viable_recall = (
             np.trapz(np.flip(y_coordinates), np.flip(x_coordinates)) / 2.0
         )
